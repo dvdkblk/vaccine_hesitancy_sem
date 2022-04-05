@@ -1,0 +1,1090 @@
+---
+title: "Vaccine Hesitancy"
+author: "David Kybelka"
+date: "18 7 2021"
+output: html_document
+---
+# Pakete laden 
+```{r}
+library(haven)
+library(tidyverse)
+library(lavaan)
+library(semTools)
+library(semPlot)
+#devtools::install_git('https://github.com/brandmaier/onyxR')
+ library(onyxR)
+#onyxR::onyx(fit_reactance, onyxfile = "C:/Users/dkd11/Downloads/onyx-1.0-1026.jar")
+library(lavaanPlot)
+library(cowplot)
+library(RColorBrewer)
+library(modelsummary)
+```
+# Impfquote und Impfbereitschaft 
+```{r}
+vacc_time <- read_tsv("germany_vaccinations_timeseries_v2.tsv")
+bereitschaft <- readxl::read_excel("statistic_id1211829_entwicklung-der-corona-impfbereitschaft-in-deutschland-2021.xlsx", 
+    sheet = "Daten", range = "B6:I45", col_names = FALSE, 
+    col_types = c("text", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric"))
+bereitschaft <- bereitschaft %>% 
+  transmute(date = as.Date(...1, format = "%d.%m.%y"), 
+            "1 (auf keinen Fall impfen)" = ...2, 
+            "2" = ...3, 
+            "3" = ...4,
+            "4" = ...5, 
+            "5" = ...6, 
+            "6" = ...7,
+            "7 (auf jeden Fall impfen)" = ...8)
+bereitschaft %>% 
+  pivot_longer(cols = 2:8, names_to = "Wert", values_to = "Prozent")%>% 
+  ggplot()+
+  geom_area(aes(x = date, y = Prozent, fill = Wert))+
+  scale_fill_brewer( palette = "Spectral")+
+  labs(x = "")+
+  scale_x_date( date_labels = "%b.%y", name = "", date_breaks = "1 months")+
+  #scale_y_continuous(expand = expansion())+
+  coord_cartesian(expand = F, xlim = c(as.Date("2021-01-01"),max(bereitschaft$date)))
+
+vacc_time %>% 
+  ggplot()+
+geom_area(aes(date, impf_quote_erst*100), fill = "#4DAF4A")+
+  scale_x_date( date_labels = "%b.%y", name = "", date_breaks = "1 months")+
+  labs(y = "Erstimpfquote")+
+  theme_minimal()+
+  coord_cartesian(xlim = c(as.Date("2021-01-01"),max(vacc_time$date)), expand = F)
+  
+
+```
+
+# Daten importieren
+```{r}
+data <- readxl::read_excel("Data.xlsx")
+
+```
+
+## Pre-Processing der Autorinnen
+```{r}
+
+# Load data, mark NAs
+data[data==-77] <- NA
+
+# Exclude health professionals
+data <- data[data$HEALTHPRO == 2,]
+
+# Liberty drehen und Sum-Score
+data$LIBERTY_3_R <- 7 - data$LIBERTY_3
+data$LIBERTY <- (data$LIBERTY_1 + data$LIBERTY_2 + data$LIBERTY_3_R) / 3
+
+#Reactance zusammenführen + Sum-Score
+data$REACTANCE_1 <- ifelse(is.na(data$SR_REACTANCE_1), data$NSR_REACTANCE_1, data$SR_REACTANCE_1)
+data$REACTANCE_2 <- ifelse(is.na(data$SR_REACTANCE_2), data$NSR_REACTANCE_2, data$SR_REACTANCE_2)
+data$REACTANCE_3 <- ifelse(is.na(data$SR_REACTANCE_3), data$NSR_REACTANCE_3, data$SR_REACTANCE_3)
+data$REACTANCE_4 <- ifelse(is.na(data$SR_REACTANCE_4), data$NSR_REACTANCE_4, data$SR_REACTANCE_4)
+data$REACTANCE <- (data$REACTANCE_1 + data$REACTANCE_2 + data$REACTANCE_3 + data$REACTANCE_4) / 4
+
+# Coll drehen und factors
+data$COLL_R <- 8 - data$COLL
+data$ETHNICITY <- factor(data$ETHNICITY)
+data$GENDER <- as.factor(data$GENDER)
+data$SELFRELEVANCE_CAT <- factor(data$SELFRELEVANCE)
+
+data$ACTIVISM_PETITION <- ifelse(is.na(data$SR_ACTIVISM_PETITION), data$NSR_ACTIVISM_PETITION, data$SR_ACTIVISM_PETITION)
+
+data$ACTIVISM_DEMO <- ifelse(is.na(data$SR_ACTIVISM_DEMO), data$NSR_ACTIVISM_DEMO, data$SR_ACTIVISM_DEMO)
+
+data$ACTIVISM_LAWSUIT <- ifelse(is.na(data$SR_ACTIVISM_LAWSUIT), data$NSR_ACTIVISM_LAWSUIT, data$SR_ACTIVISM_LAWSUIT)
+
+data$ACTIVISM_OTHERS <- ifelse(is.na(data$SR_ACTIVISM_OTHERS), data$NSR_ACTIVISM_OTHERS, data$SR_ACTIVISM_OTHERS)
+
+#Flu-Vacc
+non_flu_vaccinated <- data[data$FLU_VACCINATED == 2,]
+
+
+
+data$PREFERENCE_CENTERED <- data$PREFERENCE - mean(data$PREFERENCE)
+data$SELFRELEVANCE_CENTERED <- data$SELFRELEVANCE - mean(data$SELFRELEVANCE)
+
+data$PREFERENCE_X_SELFRELEVANCE <- data$PREFERENCE * data$SELFRELEVANCE
+
+```
+
+## Eigenes Pre-Processing  
+```{r}
+# Wenn geimpft gegen Flu, dann wird höchste Intention angenommen
+data <- data %>% mutate(flu = ifelse(FLU_VACCINATED == 1, 7, FLU_INTENTION))
+data <- data %>% mutate(female = case_when(GENDER == 2 ~ 1,
+                                   TRUE ~ 0))
+
+
+data <- data %>% mutate(Testgroup = factor(SELFRELEVANCE, labels = c("Volunt", "Mandate")))
+```
+
+# Operationalisierung 
+
+## Vaccine Mandate
+```{r}
+data %>% 
+  select("PREFERENCE", "CONF", "COMP", "CALC", "CONS", "COLL_R", "SUSCEPTIBILITY", "LIBERTY_1", "LIBERTY_2", "LIBERTY_3") %>% datasummary_skim( output = "html")
+
+
+
+data %>% 
+  select("PREFERENCE", "CONF", "COMP", "CALC", "CONS", "COLL_R", "SUSCEPTIBILITY", "LIBERTY_1", "LIBERTY_2", "LIBERTY_3") %>%
+  psych::describe()
+```
+
+## Reaktanz und Testgruppen
+```{r}
+data %>% 
+  select("REACTANCE_1", "REACTANCE_2", "REACTANCE_3", "REACTANCE_4") %>% datasummary_skim( output = "Reaktanz.html")
+
+data %>% 
+  select("REACTANCE_1", "REACTANCE_2", "REACTANCE_3", "REACTANCE_4") %>% 
+  psych::describe()
+```
+
+## Verhaltensintention
+```{r}
+data %>% 
+  select(AVOIDANCE, flu, FLU_VACCINATED, ACTIVISM_PETITION, ACTIVISM_DEMO, ACTIVISM_LAWSUIT, ACTIVISM_OTHERS, BEHAVIOR_SHOPPING, BEHAVIOR_SPACE, BEHAVIOR_CONTACT, BEHAVIOR_HOME) %>% datasummary_skim()
+data %>% 
+  select(AVOIDANCE, FLU_INTENTION, FLU_VACCINATED, ACTIVISM_PETITION, ACTIVISM_DEMO, ACTIVISM_LAWSUIT, ACTIVISM_OTHERS, BEHAVIOR_SHOPPING, BEHAVIOR_SPACE, BEHAVIOR_CONTACT, BEHAVIOR_HOME) %>%
+  psych::describe()
+```
+
+
+# Verteilung 
+```{r}
+
+vars_metr <- c( "PREFERENCE", "CONF", "COMP", "CALC", "CONS", "COLL_R", "SUSCEPTIBILITY", "LIBERTY_1", "LIBERTY_2", "INTENTION", "PREFERENCE", "LIBERTY_1", "LIBERTY_2", "LIBERTY_3_R", "ACTIVISM_PETITION", "ACTIVISM_DEMO", "ACTIVISM_LAWSUIT", "ACTIVISM_OTHERS", "REACTANCE_1", "REACTANCE_2", "REACTANCE_3", "REACTANCE_4",  "AVOIDANCE", "BEHAVIOR_SHOPPING", "BEHAVIOR_SPACE", "BEHAVIOR_CONTACT", "BEHAVIOR_HOME", "FLU_INTENTION")
+vars_dummy <- c("GENDER", "SELFRELEVANCE", "FLU_VACCINATED")
+vars_andere <- c("AGE", "EDUCATION", "ETHNICITY")
+
+# Visuell
+data %>% 
+  select(all_of(vars_metr), all_of(vars_dummy), all_of(vars_andere)) %>% 
+  pivot_longer(vars_metr, names_to = "vars", values_to = "values") %>% 
+  ggplot()+
+  geom_histogram(aes(x = values), binwidth = 1)+
+  facet_wrap(~vars, scales = "free")+
+  theme_minimal()
+
+d1 <- data %>% 
+  ggplot()+
+  geom_bar(aes(x = GENDER))+
+  scale_x_discrete(labels = c("m","w", "d" ))+
+  theme_minimal()
+
+d2 <- data %>% 
+  ggplot()+
+  geom_bar(aes(x = SELFRELEVANCE_CAT))+
+  scale_x_discrete(labels = c("freiwillig", "verpflichtend"))+
+  theme_minimal()
+d3 <- data %>% 
+  ggplot()+
+  geom_bar(aes(x = factor(FLU_VACCINATED)))+
+  scale_x_discrete(labels = c("geimpft", "ungeimpft"), name = "FLU_VACCINATED")+
+  theme_minimal()
+
+d4 <- data %>% 
+  ggplot()+
+  geom_histogram(aes(AGE))+
+  theme_minimal()
+
+plot_grid(d1,d2,d3, d4)
+
+ # Schiefe prüfen
+data %>% 
+  select(all_of(vars_metr), all_of(vars_dummy), all_of(vars_andere)) %>% 
+  select(-FLU_INTENTION) %>% 
+  mutate(across(everything(), as.numeric)) %>% 
+  mardiaKurtosis()
+
+data %>% 
+  select(all_of(vars_metr), all_of(vars_dummy), all_of(vars_andere)) %>% 
+  select(-FLU_INTENTION) %>% 
+  mutate(across(everything(), as.numeric)) %>% 
+psych::mardia(plot = T)
+
+
+```
+
+# Missings untersuchen
+```{r}
+data %>% 
+  select(all_of(vars_andere), all_of(vars_metr), all_of(vars_dummy)) %>% 
+  sapply(function(x){sum(is.na(x))})
+# Nur Flu_intention hat überhaupt missings, wird nur abgefragt, wenn noch nicht geimpft
+  
+```
+
+# Fehlervarianzen
+```{r}
+# Confidence α = .85
+# Complacency α = .76
+# Constraints α = .85
+# Calculation α = .78
+# Collective responsibility α = .71
+# (1 – r)*s² 
+
+(1-.85)*var(data$CONF) 
+(1-.76)*var(data$COMP)
+(1-.85)*var(data$CONS)
+(1-.78)*var(data$CALC)
+(1-.71)*var(data$COLL_R)
+
+```
+
+# Power Analysis
+
+```{r}
+library(simsem)
+
+full_mod <- "
+             
+PREFERENCE ~ 0.52 * CONF + 0.03 * COMP + (-0.24) * CALC + 0.04 * CONS + 0.3 * COLL_R + 0.10 * SUSCEPTIBILITY + (-0.33) *  LIBERTY 
+
+REACTANCE ~ (-0.53974)* PREFERENCE + 2.06914 * SELFRELEVANCE + (-0.2559)*PREFERENCE_X_SELFRELEVANCE
+
+AVOIDANCE ~ 0.59 * REACTANCE
+
+ACTIVISM_PETITION ~ 0.81 * REACTANCE
+ACTIVISM_DEMO ~ 0.46 * REACTANCE
+ACTIVISM_LAWSUIT ~ 0.59 * REACTANCE
+ACTIVISM_OTHERS ~ 0.62 * REACTANCE
+
+BEHAVIOR_SHOPPING ~ (-0.12) * REACTANCE
+BEHAVIOR_SPACE ~ (-0.11) * REACTANCE
+BEHAVIOR_CONTACT ~ (-0.16) * REACTANCE
+BEHAVIOR_HOME ~ (-0.05) * REACTANCE
+
+FLU_INTENTION ~ (-0.52) * REACTANCE"
+
+full_mod_analyze <- "
+PREFERENCE ~   LIBERTY + CONF + COMP +  CALC + CONS +  COLL_R +  SUSCEPTIBILITY 
+
+REACTANCE ~  PREFERENCE + SELFRELEVANCE + PREFERENCE_X_SELFRELEVANCE
+
+
+ACTIVISM_PETITION ~ REACTANCE
+ACTIVISM_DEMO ~  REACTANCE
+ACTIVISM_LAWSUIT ~  REACTANCE
+ACTIVISM_OTHERS ~ REACTANCE
+
+BEHAVIOR_SHOPPING ~  REACTANCE
+BEHAVIOR_SPACE ~ REACTANCE
+BEHAVIOR_CONTACT ~  REACTANCE
+BEHAVIOR_HOME ~  REACTANCE
+
+FLU_INTENTION ~  REACTANCE
+"
+
+fit_power <- sem(full_mod, data, missing = "FIML")
+summary(fit_power, standardized = T, fit.measures = T)
+# out <- simsem::sim(1000, full_mod_analyze, generate = fit_power, n = 579, lavaanfun = "sem", realData = data)
+#summary(out)
+
+full_mod_sem <- "
+
+#Messmodelle
+Liberty =~ LIBERTY_1 + LIBERTY_2 + LIBERTY_3_R 
+Sus =~ SUSCEPTIBILITY
+
+Conf =~ CONF
+Com =~ COMP
+Cons =~ CONS
+Cal =~ CALC
+Col =~ COLL_R
+
+Reactance =~ REACTANCE_1 + REACTANCE_2 + REACTANCE_3 + REACTANCE_4
+
+Activism =~ ACTIVISM_PETITION + ACTIVISM_DEMO + ACTIVISM_LAWSUIT + ACTIVISM_OTHERS
+
+Behavior =~ BEHAVIOR_SPACE + BEHAVIOR_SHOPPING+ BEHAVIOR_CONTACT + BEHAVIOR_HOME
+
+Avoidance =~ AVOIDANCE
+
+Preference =~ PREFERENCE
+
+#Strukturmodell
+Preference ~  (-0.33) *  Liberty + 0.52 * Conf + 0.03 * Com + (-0.24) * Cal + 0.04 * Cons + 0.3 * Col + 0.10 * Sus 
+
+Reactance ~ c((-0.53974),(-0.79533)) * Preference 
+
+Avoidance ~ 0.59 * Reactance
+
+Activism ~ 0.62 * Reactance
+
+Behavior ~ 0.11 * Reactance
+
+flu ~ (-0.52) * Reactance
+"
+full_mod_sem_analyze <- "
+#Messmodelle
+Liberty =~ LIBERTY_1 + LIBERTY_2 + LIBERTY_3_R 
+
+Sus =~ SUSCEPTIBILITY
+
+Conf =~ CONF
+
+Com =~ COMP
+
+Cons =~ CONS
+
+Cal =~ CALC
+
+Col =~ COLL_R
+
+Reactance =~ REACTANCE_1 + REACTANCE_2 + REACTANCE_3 + REACTANCE_4
+
+Activism =~ ACTIVISM_PETITION + ACTIVISM_DEMO + ACTIVISM_LAWSUIT + ACTIVISM_OTHERS
+
+Behavior =~ BEHAVIOR_SPACE + BEHAVIOR_SHOPPING+ BEHAVIOR_CONTACT + BEHAVIOR_HOME
+
+Avoidance =~ AVOIDANCE
+
+Preference =~ PREFERENCE
+
+
+Preference ~   Liberty + Conf + Com +  Cal + Cons +  Col +  Sus 
+
+Reactance ~  Preference 
+
+Avoidance ~  Reactance
+
+Activism ~ Reactance
+
+Behavior ~ Reactance
+
+flu ~  Reactance
+"
+
+fit_power_sem <- sem(full_mod_sem, data, missing = "FIML", group = "SELFRELEVANCE", group.equal = c("loadings", "residuals"))
+
+summary(fit_power_sem, standardized = T, fit.measures = T)
+#out_sem <- simsem::sim(1000, full_mod_sem_analyze, generate = fit_power_sem, n = list(288,291), lavaanfun = "sem", realData = data, group = "group")
+#summary(out_sem)
+# save(out, out_sem, file = "simulation.RData")
+
+load("simulation.RData")
+
+summary(out_sem) 
+data.frame(par = names(getPower(out_sem)), value=getPower(out_sem), row.names = NULL) %>% 
+  filter(str_detect(par, "[:alpha:]~[:alpha:]"))
+```
+
+# Messmodelle Teil1
+
+## 5Cs + Liberty + Susceptibility 
+
+### Baseline
+```{r}
+mod_liberty_five <- "
+Liberty =~ LIBERTY_1 + LIBERTY_2 + LIBERTY_3_R
+
+Confidence =~ CONF
+CONF ~~ 0.4986661*CONF
+
+Constraints =~ CONS
+CONS ~~ 0.3118732*CONS
+
+Complacency =~ COMP 
+COMP ~~ 0.5094659*COMP
+
+Calculation =~ CALC
+CALC ~~ 0.4583817*CALC
+  
+Collective =~ COLL_R 
+COLL_R ~~ 0.8702149*COLL_R
+
+Susceptibility =~ SUSCEPTIBILITY
+
+Preference =~ PREFERENCE
+
+"
+
+fit_liberty_five <- cfa(mod_liberty_five, data, estimator = "MLM")
+
+
+summary(fit_liberty_five, fit.measures = T, standardize = T, rsquare = T)
+
+
+```
+
+
+### Inspektion
+
+#### Error
+Korrelation zwischen Complacency und Collective |> 1|, deswegen error
+
+
+
+```{r}
+lavInspect(fit_liberty_five, "cor.lv")
+```
+#### Fit
+fit ist passabel
+```{r}
+
+fitmeasures(fit_liberty_five, fit.measures = c("CFI", "RMSEA", "chisq", "df", "pvalue", "SRMR"), output = "text")
+```
+
+#### Ladung
+Ladung von LIBERTY_3 ist <.7  
+
+
+#### Residuals
+
+außerdem problematische Residuen zwischen Liberty_3 und COMP, CONF und CONS 
+-> LIBERTY_3 entfernen
+
+```{r}
+resid(fit_liberty_five, type = "cor.bentler")
+```
+
+
+```{r}
+
+modindices(fit_liberty_five, sort. = T)
+
+```
+
+
+### Ohne Comp
+```{r}
+mod_liberty_five_2 <- "
+Liberty =~ LIBERTY_1 + LIBERTY_2 + LIBERTY_3_R
+
+Confidence =~ CONF
+CONF ~~ 0.4986661*CONF
+
+Constraints =~ CONS
+CONS ~~ 0.3118732*CONS
+
+Coll =~  COLL_R
+COLL_R ~~ 0.8702149*COLL_R
+
+Calculation =~ CALC
+CALC ~~ 0.4583817*CALC
+
+Susceptibility =~ SUSCEPTIBILITY
+
+Preference =~ PREFERENCE
+
+"
+
+fit_liberty_five_2 <- cfa(mod_liberty_five_2, data, estimator = "MLM")
+
+summary(fit_liberty_five_2, fit.measures = T, standardize = T, rsquare = T)
+
+```
+
+
+### Ohne Liberty 3?
+```{r}
+mod_liberty_five_3 <- "
+Liberty =~ LIBERTY_1 + LIBERTY_2 
+
+Confidence =~ CONF
+CONF ~~ 0.4986661*CONF
+
+Constraints =~ CONS
+CONS ~~ 0.3118732*CONS
+
+Coll =~  COLL_R
+COLL_R ~~ 0.8702149*COLL_R
+
+Calculation =~ CALC
+CALC ~~ 0.4583817*CALC
+
+Susceptibility =~ SUSCEPTIBILITY
+
+Preference =~ PREFERENCE
+
+
+"
+
+
+fit_liberty_five_3 <- cfa(mod_liberty_five_3, data, estimator = "MLM")
+
+
+summary(fit_liberty_five_3, fit.measures = T, standardize = T, rsquare = T)
+
+modindices(fit_liberty_five_3, sort. = T)
+
+
+```
+
+keine Hinweise auf Missspezifikation
+```{r}
+semPaths(fit_liberty_five_3, "stand", ask = F, intercept = F, combineGroups = T)
+
+fitmeasures(fit_liberty_five_3, fit.measures = c("CFI", "RMSEA", "chisq", "df", "pvalue", "SRMR"), output = "text")
+
+```
+
+### Invarianz über Gruppen 
+
+#### Freies Modell
+```{r}
+fit_liberty_five_4 <- cfa(mod_liberty_five, data, estimator = "MLM", group = "Testgroup")
+
+```
+
+
+#### Faktorinvarianz
+```{r}
+fit_liberty_five_fakt <- cfa(mod_liberty_five_3, data, estimator = "MLM", group = "Testgroup", group.equal = "loadings")
+
+summary(fit_liberty_five_fakt, standardize = T, fit.measures = T)
+
+summary(compareFit(fit_liberty_five_4, fit_liberty_five_fakt))
+```
+keine signifikante Verschlechterung
+
+#### Faktorinvarianz plus 
+```{r}
+
+fit_liberty_five_faktplus <- cfa(mod_liberty_five_3, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals"))
+
+summary(fit_liberty_five_fakt, standardize = T, fit.measures = T)
+
+
+summary(compareFit(fit_liberty_five_4, fit_liberty_five_faktplus))
+```
+auch keine signifikante Verschlechterung
+
+#### scalar invarianz
+```{r}
+fit_liberty_five_scalar <- cfa(mod_liberty_five_3, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals", "intercepts"))
+
+summary(fit_liberty_five_scalar, standardize = T, fit.measures = T)
+
+summary(compareFit(fit_liberty_five_4, fit_liberty_five_scalar))
+
+```
+Auch nicht sifnifikant schlechter
+
+#### Latente mean invarianz
+```{r}
+fit_liberty_five_latmean <- cfa(mod_liberty_five_3, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals", "intercepts", "means"))
+
+summary(fit_liberty_five_latmean, standardize = T, fit.measures = T)
+
+summary(compareFit(fit_liberty_five_4, fit_liberty_five_latmean))
+
+lavTestScore(fit_liberty_five_latmean)
+```
+#### Faktorvarianz-Invarianz 
+```{r}
+
+fit_liberty_five_faktvar <- cfa(mod_liberty_five_3, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals", "intercepts", "means", "lv.variances", "lv.covariances"))
+
+summary(fit_liberty_five_faktvar, standardize = T, fit.measures = T)
+
+summary(compareFit(fit_liberty_five_4, fit_liberty_five_faktvar))
+
+```
+Funktioniert hervorragend! 
+CFI bisschen besser, AIC/BIC gesunken, RMSEA auch,SRMR bisschen höher aber immer noch gut
+
+### Finales Modell
+```{r}
+fit_liberty_five <- fit_liberty_five_3
+
+mod_liberty_five <- mod_liberty_five_3
+
+summary(fit_liberty_five, standardize = T, fit.measures = T, rsquare= T)
+
+semPaths(fit_liberty_five, "est", ask = F, combineGroups = F, style = "lisrel", intercepts = F, fade = T)
+
+```
+
+# Messmodell Reaktanz
+```{r}
+mod_reactance <- 
+  "Reactance =~ REACTANCE_1 + REACTANCE_2 +REACTANCE_3 +REACTANCE_4 "
+
+fit_reactance <- cfa(mod_reactance, data, estimator = "MLM", group = "Testgroup")
+
+summary(fit_reactance, fit.measures = T, standardize = T, rsquare = T)
+
+#modindices(fit_reactance)
+```
+### Inspektion
+
+#### Fit
+```{r}
+fitmeasures(fit_reactance)
+```
+fit ist hervorragend! Chi² nicht mal signifikant
+
+#### Ladungen
+Ladungen auch hervorragend 
+
+#### Residuals
+```{r}
+resid(fit_reactance, type = "cor.bentler")
+```
+
+keine Problematischen Residuen
+
+### Invarianz über Gruppen 
+
+#### Scalarinvarianz
+```{r}
+
+fit_reactance_scalar <- cfa(mod_reactance, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals", "intercepts"))
+
+summary(fit_reactance_scalar, standardize = T, fit.measures = T)
+
+summary(compareFit(fit_reactance, fit_reactance_scalar))
+
+lavTestScore(fit_reactance_scalar)
+
+```
+
+
+### Finales Modell 
+```{r}
+fit_reactance <- fit_reactance_scalar
+
+summary(fit_reactance, standardize = T, rsquare = T, fit.measures = T)
+
+semPaths(fit_reactance, "est", ask = F, intercepts = F, fade = F, nCharNodes = 10)
+lavaanPlot(model = fit_reactance, coef = T)
+```
+
+## Mittelwertevergleich
+```{r}
+summary(fit_reactance, standardize = T, rsquare = T, fit.measures = T)
+
+#Mean Mandate: 0.919
+
+0.919/sqrt((3.361+4.492)/2)
+```
+
+
+# Activism
+
+## Baseline
+```{r}
+mod_activism <- 
+  "Activism =~ ACTIVISM_PETITION + ACTIVISM_DEMO + ACTIVISM_LAWSUIT + ACTIVISM_OTHERS"
+
+fit_activism <- cfa(mod_activism, data, estimator = "MLM", group = "Testgroup")
+
+
+summary(fit_activism, fit.measures = T, standardize = T, rsquare = T)
+
+```
+### Fit 
+
+sehr guter fit. Robuster Chi² auch nicht signifikant. Robuster CFI .996, SRMR .012
+```{r}
+
+summary(fit_activism, fit.measures = T)
+```
+
+### Loadings
+
+Auch gut, in beiden Gruppen > .8
+
+### Residuals
+
+```{r}
+resid(fit_activism, type = "cor.bentler")
+```
+keine problematischen Residuals
+
+### Modindices
+```{r}
+modindices(fit_activism, sort. = T)
+```
+
+Nichts außergewöhnliches
+
+### Gruppeninvarianz
+
+#### Faktorinvarianz
+```{r}
+
+fit_activism_fakt <- cfa(mod_activism, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings"))
+
+summary(fit_activism_fakt, standardize = T, fit.measures = T)
+
+
+summary(compareFit(fit_activism_fakt, fit_activism))
+
+modindices(fit_activism_fakt, sort. = T)
+
+
+resid(fit_activism_fakt, type = "cor.bentler")
+```
+
+Modell auf 10% Niveau signifikant schlechter. Andere Fitmaße sind aber immernoch sehr gut. 
+
+### Finales Modell
+```{r}
+fit_activism <- fit_activism_fakt
+
+
+summary(fit_activism, standardize = T, rsquare = T, fit.measures = T)
+
+semPaths(fit_activism, "est", ask = F, intercepts = F, fade = F, nCharNodes = 10)
+lavaanPlot(model = fit_activism, coef = T)
+```
+
+# Behavior 
+
+## Baseline
+```{r}
+mod_behavior <- 
+  "Behavior =~ BEHAVIOR_SPACE + BEHAVIOR_CONTACT + BEHAVIOR_HOME + BEHAVIOR_SHOPPING
+
+"
+
+
+fit_behavior <- cfa(mod_behavior, data, estimator = "MLM", group = "Testgroup")
+
+
+summary(fit_behavior, fit.measures = T, standardize = T, rsquare = T)
+
+#semPaths(fit_behavior, "stand", ask = F, intercepts = F)
+
+```
+
+## Inspektion
+
+### Fit
+
+Sehr gut. Chi² insignifikant
+```{r}
+fitmeasures(fit_behavior)
+```
+
+### Ladungen 
+
+Außer Behavior_Home sind alle in beiden Gruppen >.7
+eventuell ausschließen?
+
+### Residuals
+```{r}
+resid(fit_behavior, type = "cor.bentler")
+```
+
+keine problematischen Residuen
+
+#### Mod Indices  
+
+Nichts auffälliges 
+```{r}
+modificationindices(fit_behavior, sort. = T)
+```
+
+### Gruppeninvarianz
+#### Skalarinvarianz
+```{r}
+fit_behavior_fakt <- cfa(mod_behavior, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings"))
+
+
+fit_behavior_faktplus <- cfa(mod_behavior, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals"))
+
+
+fit_behavior_faktplus_partial <- cfa(mod_behavior, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals", "intercepts"), group.partial = "Behavior =~ BEHAVIOR_CONTACT")
+
+resid(fit_behavior_faktplus_partial, type = "cor.bentler")
+
+fit_behavior_scalar <- cfa(mod_behavior, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals", "intercepts"))
+
+ summary(fit_behavior_faktplus_partial, standardize = T, fit.measures = T)
+
+summary(compareFit(fit_behavior_scalar, fit_behavior, fit_behavior_fakt, fit_behavior_faktplus, fit_behavior_faktplus_partial))
+
+modindices(fit_behavior_faktplus, sort. = T)
+resid(fit_behavior_faktplus, type = "cor.bentler")
+```
+Verschlechterung nicht signifikant und gesamter Modellfit noch gut. (nur srmr passt nicht ganz)
+
+## Finales Modell
+```{r}
+fit_behavior <- fit_behavior_faktplus
+
+ summary(fit_behavior_faktplus, standardize = T, fit.measures = T, rsquare = T)
+
+```
+# Handlungsintentionen gemeinsamt
+```{r}
+mod_handlung <- paste(mod_behavior, mod_activism, "
+Avoidance =~ AVOIDANCE
+                      Flu =~ FLU_INTENTION")
+fit_handlung <- sem(mod_handlung, data, estimator = "MLM", group = "Testgroup")
+
+summary(fit_handlung, standardize = T, fit.measures = T)
+```
+
+## Invarianz
+```{r}
+fit_handlung2<- sem(mod_handlung, data, estimator = "MLM", group = "Testgroup", group.equal = c("loadings", "residuals"))
+resid(fit_handlung2, type = "cor.bentler")
+
+
+summary(fit_handlung2, standardize = T, fit.measures = T, rsquare = T)
+
+summary(compareFit(fit_handlung, fit_handlung2))
+
+modindices(fit_handlung2, sort. = T)
+
+semPaths(fit_handlung2, "est", ask = F, intercepts = F, fade = F, style = "lisrel", whatLabels = "est", nCharNodes = 10, sizeMan = 7, edge.label.cex =1	, nodeLabels = c("Space", "Contact", "Home", "Shopping", "Petition", "Demo", "Lawsuit", "Others", "Avoidance", "Intention", "Behavior", "Activism", "Covid-Vacc", "Flu-Vacc"), nDigits = 1)
+# 
+# lavaanPlot(model = fit_handlung2, coefs = T, labels = list("BEHAVIOR_SPACE" = "Space", "BEHAVIOR_CONTACT" = "Contact", "BEHAVIOR_HOME" = "Home", "BEHAVIOR_SHOPPING" = "Shopping", "ACTIVISM"))
+
+resid(fit_handlung2, type = "cor.bentler")
+
+```
+
+
+# Strukturmodell Teil1 
+```{r}
+mod_pref <- paste(mod_liberty_five, "
+                  Preference ~ Liberty + Confidence + Constraints + Coll + Calculation + Susceptibility")
+
+fit_pref <- sem(mod_pref, data, estimator = "MLM")
+
+summary(fit_pref, standardize = T, fit.measures = T, rsquare = T)
+
+semPaths(fit_pref, "stand", style = "lisrel", exoCov = F, fade = F, structural = T, nodeLabels = c( "Liberty", "Confidence", "Constraints", "Collective", "Calculation", "Susceptibility", "Impfpflicht"), sizeLat = 13, edge.label.cex =1.2)
+
+# Mit zusätzlich sociodemograph
+
+```
+## Mit sociodemographie
+```{r}
+mod_pref2 <- paste(mod_liberty_five, "
+                  Preference ~ Liberty + Confidence + Constraints + Coll + Calculation + Susceptibility + AGE + female")
+
+fit_pref2 <- sem(mod_pref2, data, estimator = "MLM")
+
+summary(fit_pref2, standardize = T, fit.measures = T, rsquare = T)
+
+
+semPaths(fit_pref2, "stand", style = "lisrel", exoCov = F, fade = F, structural = F, sizeLat = 8, edge.label.cex =0.8)
+
+```
+
+## Gruppeninvarianz der Regression
+```{r}
+
+
+fit_pref3 <- sem(mod_pref, data, estimator = "MLM", group = "Testgroup", group.equal = c("regressions", "residuals", "loadings"), meanstructure = F)
+
+fit_pref4 <- sem(mod_pref, data, estimator = "MLM", group = "Testgroup", group.equal = c( "residuals", "loadings"), meanstructure = F)
+
+# summary(fit_pref3, standardize = T, fit.measures = T, rsquare = T)
+
+summary(compareFit(fit_pref4, fit_pref3))
+```
+
+# Struktur Reaktanz
+```{r}
+
+mod_str_reactance <- paste(mod_reactance,mod_pref, "Reactance ~ Preference", sep = "\n")
+fit_str_reactance1 <- sem(mod_str_reactance, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "intercepts", "regressions"))
+
+fit_str_reactance2 <- sem(mod_str_reactance, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "intercepts", "regressions"), group.partial = "Reactance ~ Preference")
+
+summary(compareFit(fit_str_reactance1, fit_str_reactance2))
+
+semPaths(fit_str_reactance2, "est", ask = F, combineGroups = T, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "tree2", residuals = F, nodeLabels = c("Reaktanz", "Liberty", "Confidence", "Constraints", "Collective", "Calculation", "Susceptibility", "Impfpflicht" ))
+
+summary(fit_str_reactance2, standardize = T, fit.measures = T, rsquare = T)
+modificationindices(fit_str_reactance2, sort. = T)
+
+resid(fit_str_reactance2, type = "cor.bentler")
+
+mod_str_reactance2 <- paste(mod_reactance,mod_pref, "Reactance ~ Preference + Coll", sep = "\n")
+fit_str_reactance3 <- sem(mod_str_reactance2, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "intercepts", "regressions"), group.partial = c("Reactance ~ Preference"))
+
+summary(compareFit(fit_str_reactance3, fit_str_reactance2))
+#summary(fit_str_reactance3, standardize = T, fit.measures = T, rsquare = T)
+fit_str_reactance3b <- sem(mod_str_reactance2, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "intercepts", "regressions"), group.partial = c("Reactance ~ Preference", "Reactance ~ Coll"))
+
+semPaths(fit_str_reactance3, "stand", ask = F, combineGroups = F, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "tree2", residuals = F )
+
+summary(fit_str_reactance3,fit.measures = T, rsquare = T)
+```
+
+# Struktur Handlungsintentionen ohne Flu
+
+## Einfach
+```{r}
+mod_str_handlung <- paste(mod_reactance, mod_behavior, mod_activism, 
+                          "Avoidance =~ AVOIDANCE
+                          Behavior ~ Reactance
+                          Activism ~ Reactance 
+                          Avoidance ~ Reactance", sep = "\n")
+fit_str_handlung <- sem(mod_str_handlung, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "regressions"))
+
+semPaths(fit_str_handlung, "est", ask = F, combineGroups = F, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "tree2", residuals = F)
+summary(fit_str_handlung, standardize = T, rsquare = T, fit.measures = T)
+
+modindices(fit_str_handlung, sort. = T)
+
+resid(fit_str_handlung, type = "cor.bentler")
+
+lavTestScore(fit_str_handlung)
+parTable(fit_str_handlung)
+
+semPaths(fit_str_handlung, "stand", ask = F, combineGroups = F, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "tree2", residuals = F, include = 1,  title = F, filetype = "png", filename = "handlung einfach1", nodeLabels = c("Reaktanz", "Verhalten", "Aktivismus", "Cov-Impfung"))
+
+
+semPaths(fit_str_handlung, "stand", ask = F, combineGroups = F, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "tree2", residuals = F, include = 2, filetype = "png", filename = "handlung einfach2", title = F, nodeLabels = c("Reaktanz", "Verhalten", "Aktivismus", "Cov-Impfung"))
+```
+
+## einfach + flu 
+```{r}
+mod_str_handlung_flu <- paste(mod_reactance, mod_behavior, mod_activism, 
+                          "Avoidance =~ AVOIDANCE
+                          Flu =~ FLU_INTENTION
+                          Behavior ~ Reactance
+                          Activism ~ Reactance 
+                          Avoidance ~ Reactance
+                          Flu ~ Reactance", sep = "\n")
+fit_str_handlung_flu <- sem(mod_str_handlung_flu, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "regressions"))
+
+summary(fit_str_handlung_flu, standardize = T, rsquare = T, fit.measures = T)
+
+semPaths(fit_str_handlung_flu, "est", ask = F, combineGroups = F, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "tree2", residuals = F, include = 1,  title = F,filetype = "png", filename = "handlung einfach flu",  nodeLabels = c("Reaktanz", "Verhalten", "Aktivismus", "Cov-Impfung", "Grippe-Impf"))
+
+semPaths(fit_str_handlung_flu, "est", ask = F, combineGroups = F, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "tree2", residuals = F, include = 2,  title = F,filetype = "png", filename = "handlung einfach flu2",  nodeLabels = c("Reaktanz", "Verhalten", "Aktivismus", "Cov-Impfung", "Grippe-Impf"))
+```
+
+
+# Gesamt
+```{r}
+mod_str_gesamt <- paste(mod_str_reactance2, mod_behavior, mod_activism, 
+                          "Avoidance =~ AVOIDANCE
+                          Behavior ~ Reactance
+                          Activism ~ Reactance 
+                          Avoidance ~ Reactance
+                        ", sep = "\n")
+
+fit_str_gesamt <- sem(mod_str_gesamt, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "regressions"), group.partial = "Reactance ~ Preference")
+
+summary(fit_str_gesamt, standardize = T, rsquare = T, fit.measures = T)
+```
+## Gesamt_r
+avoidance - confidence 
+avoidance ~ Coll 
+
+```{r}
+
+
+modindices(fit_str_gesamt, sort. = T) %>% filter(op == "~")
+
+mod_str_gesamt2 <- paste(mod_str_gesamt, "
+                        Avoidance ~ Confidence
+                        Avoidance ~ Coll")
+fit_str_gesamt2 <- sem(mod_str_gesamt2, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "regressions"), group.partial = "Reactance ~ Preference")
+
+summary(fit_str_gesamt2, standardize = T, rsquare = T, fit.measures = T)
+
+summary(compareFit(fit_str_gesamt2, fit_str_gesamt))
+
+lavTestScore(fit_str_gesamt2)
+
+parTable(fit_str_gesamt2) 
+
+resid(fit_str_gesamt2, type = "cor.bentler")
+modindices(fit_str_gesamt2, sort. = T) %>% filter(op == "~", lhs == "Behavior")
+semPaths(fit_str_gesamt2,  "est", ask = F, combineGroups = F, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "tree2", residuals = F, include = 1,  title = F)
+
+
+```
+
+
+## Gesamt_r2
+
+
+```{r}
+
+mod_str_gesamt3 <- paste(mod_str_gesamt2,"
+                        Behavior ~ Susceptibility
+                        ")
+fit_str_gesamt3 <- sem(mod_str_gesamt3, data, estimator = "MLM", group = "Testgroup",group.equal = c("loadings", "residuals", "regressions"), group.partial = "Reactance ~ Preference")
+
+summary(compareFit(fit_str_gesamt2, fit_str_gesamt, fit_str_gesamt3))
+
+semPaths(fit_str_gesamt3,  "est", ask = F, combineGroups = F, structural = T, intercepts = F, fade = F, exoCov= F, sizeLat = 13, edge.label.cex =1.2,layout = "circle", residuals = F, include = 1,  title = F)
+
+modindices(fit_str_gesamt3, sort. = T)
+
+summary(fit_str_gesamt3, standardize = T, rsquare = T, fit.measures = T)
+
+```
+
+# Alternativhypothese
+```{r}
+# data <- data %>% mutate(pref = case_when(PREFERENCE > 5 ~ 1,
+#                                          PREFERENCE < 3 ~ 0,
+#                                          TRUE ~ NA_real_))
+data$PREF_X_SELF <- data$PREFERENCE * data$SELFRELEVANCE
+
+mod_alternativ <- paste("Reactance =~ REACTANCE_1 + REACTANCE_2 +REACTANCE_3 +REACTANCE_4
+                        Flu =~ FLU_INTENTION
+                        Flu ~ b*SELFRELEVANCE
+ 
+                        ")
+fit_alt <- sem(mod_alternativ,data, estimator = "MLM")
+
+mod_alternativ2 <- paste("Reactance =~ REACTANCE_1 + REACTANCE_2 +REACTANCE_3 +REACTANCE_4
+                        Flu =~ FLU_INTENTION
+                        Flu ~ b*SELFRELEVANCE + a*Reactance
+                        Reactance ~ c*SELFRELEVANCE 
+                        indirect := c*a
+                        total := c*a +b
+                        ")
+fit_alt2 <- sem(mod_alternativ2,data, estimator = "MLM")
+
+mod_alternativ3 <- paste("Reactance =~ REACTANCE_1 + REACTANCE_2 +REACTANCE_3 +REACTANCE_4
+                        Flu =~ FLU_INTENTION
+                        Flu ~ a*Reactance + b*SELFRELEVANCE
+                        Reactance ~ c*SELFRELEVANCE +  d*PREFERENCE + m*PREF_X_SELF
+                        
+                        indirect_high := a*c + 7*m*a
+                        total_high := indirect_high + b
+                        indirect_mid := a*c + 4*m*a
+                        total_mid := indirect_mid + b
+                        indirect_low := a*c + 1*m*a
+                        total_low := indirect_low + b
+                        ")
+fit_alt3 <- sem(mod_alternativ3,data, estimator = "MLM")
+
+summary(fit_alt2, standardize = T, rsquare = T, fit.measures = T)
+
+semPaths(fit_alt,"stand", ask = F, intercepts = F, fade = F, layout = "tree2")
+```
+
+## Mod
+```{r}
+df <- data.frame(test = c(0,0,0,1,1,1), react = c(-.535, -2.14, -3.745, 1.313, -0.922, -3.157), pref =factor( c(1,4,7,1,4,7), labels = c("tief", "mittel", "hoch")))
+ggplot(df, aes(x = test, y = react, color = pref))+
+  geom_line(size = 1.5)+
+  scale_x_continuous( breaks = c(0,1), minor_breaks = NULL,labels = c("Limitierte Impfpflicht", "Allg. Impfpflicht"), name = "Testgruppe", limits = c(-.1, 1.1))+
+  labs(y = "Reaktanz", color = "Impfpflichtbefürwortung")+
+  theme_minimal()+
+  theme(legend.position = "top")
+
+resid(fit_alt3, type = "cor.bentler")
+modificationindices(fit_alt3, sort. = T)
+
+mod_alternative4 <- paste(mod_alternativ3, "
+                          Flu ~ PREFERENCE")
+fit_alt4 <- sem(mod_alternative4, data, estimator = "MLM")
+
+summary(fit_alt4, standardize = T, rsquare = T, fit.measures = T)
+
+summary(compareFit(fit_alt3, fit_alt4))
+```
+
