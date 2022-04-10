@@ -5,3 +5,6 @@ Sprengholz et al. used sum scores and multivariate regression to investigate thi
 ![grafik](https://user-images.githubusercontent.com/75476085/161846721-088bc36e-dcec-4b02-b76c-06aa2bdaefdf.png)
 
 In a first step I analyzed weither the question items provided plausible measurement models of the latent variables, something the original authors simply assumed. For example I tested if the measurements were equally reliable in the two treatment groups. Some modifications were made, but generally the question items were useful to construct latent factors. 
+
+Second, I performed a simulation analysis to assess weither the statistical power was sufficient, given the data and under the assumption that the causal models in the original paper were correct. 
+
